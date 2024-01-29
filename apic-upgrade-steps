@@ -1,0 +1,123 @@
+https://www.ibm.com/docs/en/api-connect/10.0.5.x_lts?topic=connect-upgrading-latest-release-vmware
+https://www.ibm.com/docs/en/api-connect/10.0.5.x_lts?topic=connect-api-licenses
+https://www.ibm.com/docs/en/api-connect/10.0.5.x_lts?topic=logging-configuring-remote-vmware-deployment
+
+
+download install
+    -https://github.com/ibm-apiconnect/apicops#latest-v10-release
+
+1. Prepare
+    - VM Backup
+        API management
+        API Analytic
+        Dev Portal
+    - Check the /etc/apt/sources.list.d directory for files of the format: repo-<subsystem>-<version>-<appliance version>.list
+        $ rm <file_path>  
+    - Run cmd APIM
+        $ kubectl get nodes -o wide
+        $ apic health-check
+    - Uninstall fluent-bit
+        download
+            https://ibm.biz/BdPK9b
+
+        $ helm uninstall fluent-bit
+        $ apt install <path-to-libpq5_12.13-0ubuntu0.20.04.1_amd64.deb>
+        $ apt install <path-to-fluent-bit_2.0.6_amd64.deb>
+        $ vi /etc/fluent-bit/append-tag.lua
+            '''
+            function append_tag(tag, timestamp, record)
+                new_record = record
+                local pod_name = string.sub(string.match(tag, "^kube%.var%.log%.containers%.(.+)$"), 1, 16)
+                local container_id = string.sub(string.match(tag, "-([^-]+)%.log$"), 1, 16)
+
+                new_record["tag"] = pod_name .. "_" .. container_id
+                return 1, timestamp, new_record
+            end
+            '''
+        $ vim /etc/fluent-bit/fluent-bit.conf
+            '''
+            [SERVICE]
+                flush        1
+                daemon       Off
+                log_level    info
+                parsers_file parsers.conf
+                plugins_file plugins.conf
+                http_server  Off
+                http_listen  0.0.0.0
+                http_port    2020
+                storage.metrics on
+
+            [INPUT]
+                Name tail
+                Path /var/log/containers/*.log
+                Parser cri
+                Mem_Buf_Limit 5MB
+                Skip_Long_Lines On
+
+            [OUTPUT]
+                name  stdout
+                match *
+            '''
+        $ systemctl enable fluent-bit
+        $ systemctl start fluent-bit
+
+
+2. Upgrade
+    - Complete the prerequisites
+        $ kubectl get pod --no-headers=true | grep postgres | grep -v backup | awk '{print $1}' | xargs kubectl delete pod
+        $ apic clean-upgrade-files
+
+    - Make sure the disk usage shown is below 70%.
+        $ df -h /data/secure
+        $ df -h /
+
+    - Back up the Postgres images on one of the Management Server VMs.
+        $ postgres_operator=$(kubectl get pod -l app.kubernetes.io/name=postgres-operator -o name)
+
+        $ ctr --namespace k8s.io images pull --plain-http=true `kubectl get  $postgres_operator  -o jsonpath='{.spec.containers[].env[?(@.name=="RELATED_IMAGE_PGO_RMDATA")].value}'`
+        $ ctr --namespace k8s.io images export rmdata.tar `kubectl get  $postgres_operator  -o jsonpath='{.spec.containers[].env[?(@.name=="RELATED_IMAGE_PGO_RMDATA")].value}'`
+        $ ctr --namespace k8s.io images export backrestrepo.tar `kubectl get  $postgres_operator  -o jsonpath='{.spec.containers[].env[?(@.name=="RELATED_IMAGE_PGO_BACKREST_REPO")].value}'`
+        $ ctr --namespace k8s.io images export pgbouncer.tar `kubectl get  $postgres_operator  -o jsonpath='{.spec.containers[].env[?(@.name=="RELATED_IMAGE_CRUNCHY_PGBOUNCER")].value}'`
+        $ ctr --namespace k8s.io images export postgres-ha.tar `kubectl get  $postgres_operator  -o jsonpath='{.spec.containers[].env[?(@.name=="RELATED_IMAGE_CRUNCHY_POSTGRES_HA")].value}'`
+
+        $ postgres_pod=$(kubectl get pod -l role=master -o name)
+        $ ctr --namespace k8s.io images export k8s-init.tar `kubectl get $postgres_pod  -o jsonpath='{.spec.initContainers[].image}'`
+
+    - Run the health check on the Management subsystem:
+        $ apicops --version
+        $ apicops version:pre-upgrade
+        $ apicops appliance-checks:appliance-pre-upgrade
+    - Run the health check on the Portal subsystem:
+        $ apicops --version
+        $ apicops version:pre-upgrade
+        $ apicops appliance-checks:appliance-pre-upgrade
+    - Run the health check on the Analytics subsystem:
+        $ apicops --version
+        $ apicops version:pre-upgrade
+        $ apicops appliance-checks:appliance-pre-upgrade
+
+    - Install the installation utility.
+        - Locate the apicup installation utility file for your operating system, and place it in your project directory
+        - Rename the file for your OS type to apicup. Note that the instructions in this documentation refer to apicup.
+        - OSX and Linux® only: Make the apicup file an executable file by entering chmod +x apicup.
+        ''
+        v10.0.5.3 up
+        $ apicup licenses accept L-VQYA-YNM22H
+
+        v10.0.5.1
+        $ apicup licenses accept L-RJON-CEBLEH
+        ''
+
+    - Disassociate and delete your Analytics services.
+        - In Cloud Manager UI, click Topology.
+        - In the section for the Availability Zone that contains the Analytics service, locate the Gateway service that the Analytics service is associated with.
+        - Click the actions menu, and select Unassociate analytics service.
+        - Remember to disassociate each Analytics service from all Gateways.
+        - In the section for the Availability Zone that contains the Analytics services, locate each Analytics service and click Delete.
+
+    - Run upgrade Management
+        $ apicup subsys install mgmt upgrade_management_10.0.5.5.tar
+        $ apicup subsys health-check mgmt
+
+        $ apicops upgrade:stale-certs 
+        kubectl delete secret <stale-secret> 
